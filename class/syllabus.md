@@ -4,7 +4,7 @@
 
 # 🎓 [강의계획서] AI 에이전트 기반 학술 데이터 자동화 및 2nd-Brain 구축
 
-**과목명:** 자율형 AI 에이전트 구축 및 학술 데이터 분석 (*Autonomous AI Agents &amp; Research Analytics*)
+**과목명:** 자율형 AI 에이전트 구축 및 학술 데이터 분석 (*Autonomous AI Agents & Research Analytics*)
 
 **수강 대상:** 컴퓨터공학 / 데이터사이언스 / 인공지능 관련 전공 (3~4학년)
 
