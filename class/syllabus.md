@@ -87,7 +87,7 @@
 
 - **8주차 | Andrej Karpathy 스타일의 LLM Wiki 패러다임 &amp; Obsidian**
 - **이론:** Vector RAG의 한계점 극복을 위한 컴파일형 지식베이스(LLM Wiki) 구조 이해
-- **실습:** Obsidian Vault 디렉터리 설계 (`raw/`, `wiki/papers/`, `wiki/concepts/`, `AGENTS.md`)
+- **실습:** Obsidian Vault 디렉터리 설계 (`raw/`, `entities/`, `concepts/`, `comparisons/`, `queries/`, `SCHEMA.md`, `index.md`, `log.md`, `AGENTS.md`)
 
   
 - **9주차 | LLM Wiki Compiler Agent 개발**
