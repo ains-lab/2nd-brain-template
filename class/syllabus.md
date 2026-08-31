@@ -1,10 +1,10 @@
-요청하신 15주차 기말고사를 3~~4단계(8~~14주차) 내용을 다루는 이론 중심의 기말고사(필기 서술형/개념 평가)로 변경하여 재정렬한 학생 공지용 강의계획서입니다.
+요청하신 15주차 기말고사를 3~4단계(8~14주차) 내용을 다루는 이론 중심의 기말고사(필기 서술형/개념 평가)로 변경하여 재정렬한 학생 공지용 강의계획서입니다.
 
 ---
 
 # 🎓 [강의계획서] AI 에이전트 기반 학술 데이터 자동화 및 2nd-Brain 구축
 
-**과목명:** 자율형 AI 에이전트 구축 및 학술 데이터 분석 (*Autonomous AI Agents &amp; Research Analytics*)
+**과목명:** 자율형 AI 에이전트 구축 및 학술 데이터 분석 (*Autonomous AI Agents & Research Analytics*)
 
 **수강 대상:** 컴퓨터공학 / 데이터사이언스 / 인공지능 관련 전공 (3~4학년)
 
@@ -95,7 +95,7 @@
 #### 8주차 | Andrej Karpathy 스타일의 LLM Wiki 패러다임 &amp; Obsidian
 - **Intent:** 컴파일형 지식베이스의 설계 원리를 이해하고, Obsidian 기반 LLM Wiki의 기본 구조를 만든다.
 - **이론:** Vector RAG의 한계점 극복을 위한 컴파일형 지식베이스(LLM Wiki) 구조 이해
-- **실습:** Obsidian Vault 디렉터리 설계 (`raw/`, `wiki/papers/`, `wiki/concepts/`, `AGENTS.md`)
+- **실습:** Obsidian Vault 디렉터리 설계 (`raw/`, `entities/`, `concepts/`, `comparisons/`, `queries/`, `SCHEMA.md`, `index.md`, `log.md`, `AGENTS.md`)
 
   
 #### 9주차 | LLM Wiki Compiler Agent 개발
