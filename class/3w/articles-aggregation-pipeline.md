@@ -1,382 +1,250 @@
-가능합니다. Hermes에서는 **“논문 수집 → 중복 제거 → 선별 → 요약 → 파일 저장 → 주간 종합”**을 하나의 Cron 기반 연구 자동화 파이프라인으로 구성하는 방식이 가장 안정적입니다. Hermes 자체가 반복 작업을 실행하는 Cron, Skill 주입, `workdir` 기반 파일 작업을 지원하므로 이 용도와 잘 맞습니다. Hermes Cron은 각 실행마다 새로운 Agent 세션을 만들기 때문에, 자동화 프롬프트와 Skill에 검색 키워드·저장 규칙·요약 형식을 명시해 두는 것이 중요합니다. [GitHub](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/cron.md?utm_source=chatgpt.com)
+네. 이 경우에는 기존의 **“논문 DB를 구축하고 DB를 검색하는 구조”**보다, **LLM Wiki를 연구 지식의 중심 저장소로 두는 구조**가 더 적합합니다.
 
-### 추천 아키텍처
+LLM Wiki의 핵심은 새 논문이 들어올 때마다 단순히 논문 요약 파일 하나를 추가하는 것이 아니라, **기존 Wiki의 개념·주제·비교·Research Gap 페이지까지 함께 갱신하는 것**입니다. 공식적인 LLM Wiki 패턴도 raw source → wiki → schema의 계층을 두고, 새 source가 들어오면 관련 페이지를 업데이트하고 서로 연결하면서 지식을 증분적으로 유지하는 방식을 지향합니다. [GitHub](https://github.com/microsoft/llmwiki/blob/main/README.md?utm_source=chatgpt.com)
+
+## 전체 목표 구조
+
+제가 추천하는 최종 구조는 다음입니다.
 
 ```
-                [Hermes Gateway]
-                       │
+                    Hermes Agent
+                         │
                   Cron Scheduler
-                 매일 07:00 실행
-                       │
-                       ▼
-             [Paper Collector Skill]
-                       │
-       ┌───────────────┼────────────────┐
-       ▼               ▼                ▼
-    OpenAlex       Semantic Scholar    arXiv
-       │               │                │
-       └───────────────┼────────────────┘
-                       ▼
-                후보 논문 Metadata
-                       │
-                       ▼
-               [Deduplication]
-            DOI / arXiv ID / Title
-                       │
-                       ▼
-              [Relevance Filter]
-          keyword + LLM relevance score
-                       │
-             ┌─────────┴──────────┐
-             │                    │
-          관련 없음             관련 있음
-             │                    │
-           폐기                   ▼
-                           PDF/Abstract 수집
-                                  │
-                                  ▼
-                           [LLM Summarizer]
-                                  │
-                 ┌────────────────┼──────────────┐
-                 ▼                ▼              ▼
-               요약             평가           태그
-                 │                │              │
-                 └────────────────┼──────────────┘
-                                  ▼
-                           Markdown 저장
-                                  │
-                    ┌─────────────┴─────────────┐
-                    ▼                           ▼
-              papers/*.md                 index.json/db
-                    │
-                    ▼
-             Weekly Synthesis
-                    │
-                    ▼
-       "이번 주 연구동향 / 연구공백 / 중요논문"
+                         │
+                         ▼
+                ① 논문 자동 발견
+                         │
+        ┌────────────────┼────────────────┐
+        ▼                ▼                ▼
+     OpenAlex      Semantic Scholar      arXiv
+        │                │                │
+        └────────────────┼────────────────┘
+                         ▼
+                 신규 후보 논문
+                         │
+                         ▼
+                ② 관련성 1차 평가
+                         │
+                relevance >= 기준
+                         │
+                         ▼
+               ③ Raw Source 저장
+                         │
+                         ▼
+                  LLM Wiki Ingest
+                         │
+              ┌──────────┼───────────┐
+              ▼          ▼           ▼
+          논문 페이지   개념 페이지   주제 페이지
+              │          │           │
+              └──────────┼───────────┘
+                         ▼
+                 기존 Wiki 재구성
+                         │
+              새 주장 / 관계 / 충돌
+                         │
+                         ▼
+              ④ Cross-paper Synthesis
+                         │
+         ┌───────────────┼────────────────┐
+         ▼               ▼                ▼
+      비교표          Research Gap       Trend
+         │               │                │
+         └───────────────┼────────────────┘
+                         ▼
+               ⑤ Research Idea Engine
+                         │
+                기존 지식 + 신규 논문
+                         │
+                         ▼
+                  새로운 연구 아이디어
+                         │
+                  가설 / RQ / 실험설계
 ```
 
-논문 검색 소스는 처음부터 너무 많이 붙이지 말고 **OpenAlex + Semantic Scholar + arXiv** 정도로 시작하는 것을 권합니다. 특히 Semantic Scholar는 논문 metadata뿐 아니라 추천 논문 API도 제공하므로, 단순 키워드 검색에서 나아가 **“내가 중요하다고 지정한 논문과 유사한 신규 논문”**을 자동 탐색하는 2단계 파이프라인으로 확장할 수 있습니다. [Semantic Scholar](https://api.semanticscholar.org/api-docs/recommendations?utm_source=chatgpt.com)
+즉, **DB 대신 Markdown Wiki 자체가 지식 저장소**가 됩니다.
 
 ---
 
-## 1. 연구 프로젝트 디렉터리 구성
+# 1. 가장 중요한 변화: Paper 중심이 아니라 Knowledge 중심
 
-예를 들어 현재 연구 주제가 AI Agent Security와 CTI-KG라면 다음처럼 구성하면 관리하기 편합니다.
+기존 방식은 보통 다음과 같습니다.
 
 ```
-research-agent/
+Paper A → Summary A
+Paper B → Summary B
+Paper C → Summary C
+```
+
+100편을 수집하면 100개의 요약이 생깁니다.
+
+문제는 이것만으로는 지식이 서로 연결되지 않는다는 점입니다.
+
+LLM Wiki 방식은 다음과 같습니다.
+
+```
+Paper A ──┐
+Paper B ──┼──→ [[AI Agent Security]]
+Paper C ──┘              │
+                         ├── [[Tool Misuse]]
+                         ├── [[Behavior Monitoring]]
+                         ├── [[CTI Grounding]]
+                         └── [[Knowledge Graph Reasoning]]
+```
+
+그리고 새 논문 Paper D가 들어오면:
+
+```
+Paper D
+   │
+   ├─ 기존 주장 보강
+   ├─ 기존 주장 반박
+   ├─ 새로운 방법 추가
+   ├─ 기존 연구 한계 수정
+   └─ 새로운 Research Gap 생성
+```
+
+이 되는 구조입니다.
+
+Microsoft의 `llmwiki` 프로젝트도 이를 **LLM이 지속적으로 관리하는 personal knowledge base**로 설명하며, 새로운 source를 추가할 때 기존 entity/topic 페이지를 수정하고 contradiction과 cross-reference까지 갱신하는 방식을 채택하고 있습니다. [GitHub](https://github.com/microsoft/llmwiki/blob/main/README.md?utm_source=chatgpt.com)
+
+---
+
+# 2. DB 없는 디렉터리 구조
+
+예를 들어 연구 프로젝트를 다음과 같이 구성합니다.
+
+```
+research-wiki/
+│
+├── .hermes.md
+│
+├── schema.md
+│
+├── index.md
+│
 │
 ├── config/
 │   ├── keywords.yaml
-│   ├── journals.yaml
-│   └── prompt.md
+│   ├── research-question.md
+│   └── collection-policy.md
 │
-├── skills/
-│   └── paper-research/
-│       └── SKILL.md
+├── raw/
+│   └── papers/
+│       ├── 2026/
+│       │   ├── paper-a.pdf
+│       │   ├── paper-a.md
+│       │   ├── paper-b.pdf
+│       │   └── paper-b.md
 │
-├── scripts/
-│   ├── collect.py
-│   ├── deduplicate.py
-│   └── update_index.py
+├── wiki/
 │
-├── data/
-│   ├── papers.json
-│   └── seen_ids.json
+│   ├── papers/
+│   │   ├── paper-a.md
+│   │   ├── paper-b.md
+│   │   └── paper-c.md
+│   │
+│   ├── concepts/
+│   │   ├── ai-agent-security.md
+│   │   ├── cti-grounding.md
+│   │   ├── knowledge-graph.md
+│   │   ├── behavior-chain.md
+│   │   ├── spec-gaming.md
+│   │   └── tool-misuse.md
+│   │
+│   ├── topics/
+│   │   ├── agent-threat-detection.md
+│   │   ├── cti-kg-agent-security.md
+│   │   ├── runtime-monitoring.md
+│   │   └── agent-guardrails.md
+│   │
+│   ├── methods/
+│   │   ├── behavior-only-detection.md
+│   │   ├── text-rag.md
+│   │   ├── graph-reasoning.md
+│   │   └── runtime-policy.md
+│   │
+│   ├── comparisons/
+│   │   ├── cti-kg-vs-rag.md
+│   │   └── behavior-vs-context-aware.md
+│   │
+│   ├── gaps/
+│   │   ├── research-gaps.md
+│   │   └── unresolved-questions.md
+│   │
+│   └── ideas/
+│       ├── idea-001.md
+│       ├── idea-002.md
+│       └── idea-003.md
 │
-├── papers/
-│   ├── 2026/
-│   │   ├── 2026-09-07-paper1.md
-│   │   └── ...
+├── synthesis/
+│   ├── weekly/
+│   └── monthly/
 │
-├── reports/
-│   ├── daily/
-│   └── weekly/
-│
-└── README.md
+└── logs/
+    └── ingest-log.md
 ```
 
-Hermes Cron에 `--workdir`를 지정하면 이 디렉터리를 기준으로 파일 읽기·쓰기 및 코드 실행을 수행할 수 있습니다. Hermes 문서에서도 Cron 작업에 `workdir`를 지정하면 해당 디렉터리의 프로젝트 지침과 파일 도구가 그 경로를 기준으로 작동한다고 설명합니다. [GitHub](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/cron.md?utm_source=chatgpt.com)
+여기서 별도의 PostgreSQL, MySQL, SQLite DB를 연구 데이터의 원본으로 둘 필요가 없습니다.
+
+**Markdown이 Source of Truth**입니다.
+
+일부 LLM Wiki 구현은 검색 속도를 위해 내부적으로 SQLite 같은 파생 index를 사용할 수 있지만, 이는 언제든 Markdown으로부터 다시 만들 수 있는 cache일 뿐입니다. 실제 LLM Wiki 문서도 이 구조를 명확히 설명합니다. [LLM Wiki](https://llmwiki.cc/docs?utm_source=chatgpt.com)
 
 ---
 
-## 2. 키워드는 단순 문자열보다 “연구 개념”으로 관리
+# 3. Raw Source와 Wiki를 반드시 분리
 
-`keywords.yaml`을 다음처럼 만들어 두는 것이 좋습니다.
-
-```
-research_topic:
-  name: "CTI-KG for AI Agent Security"
-
-primary:
-  - "AI agent security"
-  - "autonomous agent security"
-  - "LLM agent security"
-  - "agentic AI security"
-
-cti:
-  - "cyber threat intelligence"
-  - "CTI"
-  - "threat intelligence"
-
-knowledge_graph:
-  - "knowledge graph"
-  - "security knowledge graph"
-  - "CTI knowledge graph"
-  - "threat knowledge graph"
-
-behavior:
-  - "agent behavior"
-  - "tool misuse"
-  - "spec gaming"
-  - "reward hacking"
-  - "unsafe tool use"
-
-detection:
-  - "threat detection"
-  - "attack detection"
-  - "behavior detection"
-  - "anomaly detection"
-
-exclude:
-  - "robot navigation"
-  - "medical agent"
-```
-
-그리고 검색식을 자동으로 생성합니다.
+이 설계에서 아주 중요한 원칙입니다.
 
 ```
-("AI agent security" OR "LLM agent security")
-AND
-("cyber threat intelligence" OR "knowledge graph")
+raw/
 ```
 
-검색식을 하나만 만들지 말고 5~10개 정도의 **검색 Query Set**으로 분산시키는 것이 좋습니다.
+는 **원본 증거 저장소**입니다.
+
+```
+wiki/
+```
+
+는 **LLM이 해석하고 정리한 지식 저장소**입니다.
 
 예:
 
 ```
-Q1: "LLM agent" AND "cybersecurity"
-Q2: "AI agent" AND "knowledge graph" AND security
-Q3: "cyber threat intelligence" AND "knowledge graph"
-Q4: "agentic AI" AND threat detection
-Q5: "LLM agent" AND "spec gaming"
-Q6: "AI agent" AND "tool misuse"
-Q7: "autonomous agent" AND attack detection
+raw/papers/2026/paper123.md
 ```
 
-이렇게 해야 특정 용어를 사용하지 않은 관련 연구까지 놓치지 않습니다.
-
----
-
-## 3. 수집 단계에서는 LLM을 사용하지 않는 것이 좋습니다
-
-여기가 중요한 설계 포인트입니다.
-
-매일 Cron이 실행될 때 처음부터 Hermes에게
-
-> 인터넷에서 논문을 찾아줘.
-
-라고 하는 것보다, Python/API가 먼저 논문 metadata를 가져오게 하는 것이 안정적입니다.
+에는:
 
 ```
-Cron
- ↓
-collect.py
- ↓
-OpenAlex / Semantic Scholar / arXiv
- ↓
-papers_raw.json
+Title
+Authors
+DOI
+Abstract
+Full Text
+Source URL
+Collected Date
 ```
 
-예:
+등 원문 정보를 보존합니다.
+
+반면:
 
 ```
-{
-  "title": "CTI-based Knowledge Graph for ...",
-  "authors": ["A", "B"],
-  "year": 2026,
-  "doi": "10.xxxx/xxx",
-  "arxiv_id": "2609.xxxxx",
-  "abstract": "...",
-  "source": "OpenAlex",
-  "url": "...",
-  "collected_at": "2026-09-07"
-}
+wiki/papers/paper123.md
 ```
 
-그 다음에만 Hermes/LLM을 호출합니다.
-
-이렇게 분리하면 검색 결과가 100개인 날에도 **100개 모두를 LLM에 넣는 낭비**를 피할 수 있습니다.
-
----
-
-## 4. 중복 제거는 반드시 LLM 이전에 수행
-
-동일 논문이 OpenAlex, Semantic Scholar, arXiv 세 곳에 동시에 존재할 수 있습니다.
-
-따라서 순서를
-
-```
-수집
- ↓
-중복 제거
- ↓
-관련성 평가
- ↓
-LLM 분석
-```
-
-으로 해야 합니다.
-
-중복 판정 우선순위는 다음 정도면 충분합니다.
-
-```
-1순위 DOI
-2순위 arXiv ID
-3순위 Semantic Scholar Paper ID
-4순위 normalized title
-```
-
-예:
-
-```
-paper_key = (
-    doi
-    or arxiv_id
-    or semantic_scholar_id
-    or normalized_title
-)
-```
-
-그리고
-
-```
-data/seen_ids.json
-```
-
-또는 SQLite에 저장합니다.
-
-개인적으로는 논문이 수백 편을 넘어가면 JSON보다 SQLite를 추천합니다.
-
-```
-papers.db
-
-papers
- ├─ id
- ├─ doi
- ├─ title
- ├─ abstract
- ├─ published_date
- ├─ relevance_score
- ├─ summary
- ├─ collected_at
- └─ status
-```
-
----
-
-## 5. Hermes가 담당할 핵심은 “관련성 판단”
-
-검색된 논문을 LLM에게 바로 요약시키지 말고 먼저 점수를 매기게 합니다.
-
-예를 들어:
-
-```
-0 = 연구와 무관
-1 = 약간 관련
-2 = 관련
-3 = 매우 관련
-4 = 핵심 선행연구
-5 = 반드시 검토해야 할 논문
-```
-
-Hermes Prompt:
-
-```
-우리의 연구 주제는 다음과 같다.
-
-"CTI Knowledge Graph를 활용하여
-AI Agent의 행동 연쇄를 탐지하고
-위험한 Tool 실행을 조기에 차단하는 방법"
-
-아래 논문의 제목과 초록을 평가하라.
-
-평가기준:
-
-1. AI Agent와 직접 관련성이 있는가?
-2. Cybersecurity와 관련있는가?
-3. CTI 또는 Knowledge Graph와 관련있는가?
-4. Agent 행동 탐지 또는 Tool 실행 통제와 관련있는가?
-5. 우리 연구의 baseline 또는 비교대상이 될 수 있는가?
-
-0~5점으로 relevance_score를 부여한다.
-
-JSON으로 반환:
-
-{
- "score": 0-5,
- "reason": "...",
- "tags": [],
- "research_role": ""
-}
-```
-
-그리고 예를 들어
-
-```
-score >= 3
-```
-
-인 논문만 본격 분석합니다.
-
-이 한 단계만 넣어도 자동화 품질이 크게 올라갑니다.
-
----
-
-## 6. 논문별 요약은 “요약”보다 연구 분석 형태로 저장
-
-단순하게
-
-```
-이 논문은 XXX를 연구하였다.
-```
-
-만 저장하면 나중에 논문 작성 때 활용도가 낮습니다.
-
-대신 다음 형식을 권합니다.
+에는:
 
 ```
 # Paper Title
 
-## Metadata
-
-- Authors:
-- Year:
-- Venue:
-- DOI:
-- URL:
-- Citation:
-- Relevance Score: 4/5
-
-## 한 줄 요약
+## 핵심 주장
 
 ...
 
-## 연구 문제
-
-...
-
-## 핵심 아이디어
-
-...
-
-## 방법론
-
-...
-
-## 데이터셋 / 실험환경
+## 방법
 
 ...
 
@@ -384,361 +252,983 @@ score >= 3
 
 ...
 
-## 강점
-
-...
-
 ## 한계
 
 ...
 
-## 우리 연구와의 관계
+## 관련 개념
+
+- [[CTI Grounding]]
+- [[AI Agent Security]]
+- [[Knowledge Graph Reasoning]]
+
+## 관련 연구
+
+- [[Paper A]]
+- [[Paper B]]
+
+## 기존 연구 대비 차이
 
 ...
 
-## 우리 연구와의 차이
+## 우리 연구에 주는 의미
 
 ...
 
-## Baseline 활용 가능성
+## Evidence
 
-...
-
-## Research Gap
-
-...
-
-## 인용할 만한 주장
-
-...
-
-## Tags
-
-#CTI
-#KnowledgeGraph
-#AIAgentSecurity
-#AgentBehavior
+[[raw-paper-123]]
 ```
 
-이 포맷은 이후 박사논문의 **Related Work 작성 자동화**에도 그대로 활용할 수 있습니다.
+를 저장합니다.
+
+즉,
+
+> Raw = 증거  
+> Wiki = 지식
+
+입니다.
 
 ---
 
-## 7. 논문 파일 저장
+# 4. Hermes의 첫 번째 Cron — 논문 발견
 
-예를 들어:
-
-```
-papers/
-└── 2026/
-    └── 09/
-        ├── park-2026-cti-knowledge-graph.md
-        ├── kim-2026-agent-security.md
-        └── smith-2026-llm-tool-misuse.md
-```
-
-그리고 별도의 index:
-
-```
-# Paper Index
-
-| Date | Paper | Score | Category |
-|---|---|---:|---|
-| 2026-09-07 | CTI Knowledge Graph... | 5 | CTI-KG |
-| 2026-09-07 | Agent Tool Security... | 4 | Agent Security |
-```
-
-를 자동 업데이트하도록 합니다.
-
----
-
-## 8. 가장 중요한 기능: 주간 Research Synthesis
-
-개별 논문 요약보다 이것이 박사논문 연구에는 더 가치가 있습니다.
-
-매일 수집한 논문을 일요일 밤 Hermes가 다시 읽어서:
-
-```
-이번 주 논문 17편
-        ↓
-Theme clustering
-        ↓
-연구 동향
-        ↓
-주요 방법
-        ↓
-공통 한계
-        ↓
-Research Gap
-        ↓
-내 연구에 미치는 영향
-```
-
-을 분석하도록 합니다.
-
-결과:
-
-```
-# Weekly Research Brief
-2026-09-01 ~ 2026-09-07
-
-## 이번 주 신규 논문
-17편
-
-## 중요 논문
-5편
-
-## 연구 동향
-
-### 1. Agent behavior monitoring
-...
-
-### 2. CTI grounding
-...
-
-### 3. Knowledge Graph reasoning
-...
-
-## 기존 연구에서 반복적으로 나타나는 한계
-
-1. 대부분 static CTI 사용
-2. Agent 행동 연쇄를 고려하지 않음
-3. Tool execution 이전 조기탐지가 부족
-4. Text-RAG와 KG 비교 실험 부족
-
-## 새롭게 보이는 Research Gap
-
-...
-
-## 현재 박사논문 가설에 미치는 영향
-
-...
-
-## 반드시 읽어야 할 논문 TOP 5
-
-...
-
-## 다음 주 추적 키워드
-
-...
-```
-
-이 단계부터 단순 **논문 자동수집 시스템**이 아니라 **Research Intelligence System**이 됩니다.
-
----
-
-# Hermes Cron 구성
-
-Hermes는 자연어 일정과 표준 Cron 표현식을 모두 지원합니다. Cron 작업은 gateway가 주기적으로 확인하여 실행하고, 매 실행 시 fresh Agent session을 생성합니다. 따라서 “지난번 대화를 기억하겠지”라고 가정하면 안 되고, 파일이나 DB를 상태 저장소로 사용해야 합니다. [GitHub](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/cron.md?utm_source=chatgpt.com)
-
-예를 들어 매일 오전 7시:
-
-```
-hermes cron create "every day at 7am" \
-  "Run the research paper collection pipeline.
-   Collect newly published papers matching config/keywords.yaml.
-   Deduplicate against data/papers.db.
-   Evaluate relevance.
-   Analyze papers with relevance >= 3.
-   Save the results under papers/.
-   Update the research index." \
-  --workdir /home/user/research-agent \
-  --name "Daily Paper Research"
-```
-
-매주 일요일:
-
-```
-hermes cron create "every sunday 9pm" \
-  "Review all papers collected during the last 7 days.
-   Produce a weekly research synthesis.
-   Identify important papers, emerging themes,
-   methodological trends, research gaps,
-   potential baselines and implications for our research.
-   Save the report under reports/weekly/." \
-  --workdir /home/user/research-agent \
-  --name "Weekly Research Synthesis"
-```
-
-Hermes는 Skill을 Cron 작업에 붙이는 것도 지원하기 때문에, 장기적으로는 긴 Prompt를 매번 Cron에 넣기보다는 `paper-research` 같은 Skill로 만드는 것이 더 깔끔합니다. [GitHub](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/cron.md?utm_source=chatgpt.com)
+Hermes Cron은 반복 작업과 Skill 연결을 지원하므로, 논문 수집 Agent를 매일 실행하면 됩니다. Cron job은 실행될 때 fresh agent session을 사용하므로 장기 상태는 대화 기억이 아니라 **workdir의 Wiki 파일**에 남기는 것이 중요합니다. [GitHub](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/cron.md?utm_source=chatgpt.com)
 
 예:
 
 ```
-hermes cron create "every day at 7am" \
-  "Collect and analyze newly published papers." \
-  --skill paper-research \
-  --workdir /home/user/research-agent
+매일 오전 07:00
+
+Paper Discovery Agent
 ```
 
----
-
-# 추천 Skill 구성
+역할:
 
 ```
-skills/paper-research/SKILL.md
-```
-
-안에 다음을 고정합니다.
-
-```
-# Paper Research Skill
-
-## Objective
-
-Continuously discover and analyze academic literature
-related to the configured research topic.
-
-## Workflow
-
-1. Read config/keywords.yaml
-2. Run scripts/collect.py
-3. Load newly discovered papers
-4. Remove duplicates
-5. Score relevance from 0-5
-6. Ignore papers below 3
-7. Analyze remaining papers
-8. Save Markdown
-9. Update papers.db
-10. Update research index
-
-## Analysis format
-
-- One-line summary
-- Research question
-- Method
-- Dataset
-- Results
-- Strength
-- Limitation
-- Relationship with our work
-- Research gap
-- Potential baseline
-- Tags
-
-## Rules
-
-Never overwrite existing paper notes.
-
-Use DOI as primary unique identifier.
-
-Separate facts stated by the paper from your interpretation.
-
-Do not claim full-paper findings when only the abstract
-was available.
-
-Mark evidence_source as one of:
-
-- title
-- abstract
-- fulltext
-```
-
-특히 마지막 세 줄이 중요합니다.
-
-**초록만 읽어 놓고 LLM이 논문 전체 방법론·실험 결과를 추측하는 문제를 막아야 합니다.**
-
----
-
-# 최종적으로는 3개 Cron으로 나누는 것을 추천합니다
-
-```
-┌─────────────────────────────────────┐
-│       Hermes Research Pipeline      │
-└─────────────────────────────────────┘
-
-① Daily Discovery
-매일 07:00
-
 OpenAlex
 Semantic Scholar
 arXiv
-    ↓
-신규 논문
-    ↓
-Dedup
-    ↓
-Relevance
-    ↓
-Markdown + DB
-
-
-② Weekly Synthesis
-일요일 21:00
-
-지난 7일 논문
-    ↓
-Theme clustering
-    ↓
-Research trends
-    ↓
-Research gaps
-    ↓
-Weekly report
-
-
-③ Monthly Thesis Review
-매월 1일
-
-지난 30일 연구
-       +
-기존 논문 DB
-       ↓
-박사논문 Research Question
-       ↓
-가설 변화
-       ↓
-Baseline 변화
-       ↓
-연구공백 변화
-       ↓
-"논문 전략 업데이트"
+ ↓
+신규 논문 검색
+ ↓
+기존 raw/ 확인
+ ↓
+신규 논문만 처리
 ```
 
-이 **③ Monthly Thesis Review**까지 넣으면 꽤 강력합니다.
+검색 키워드는:
+
+```
+ai_agent:
+  - AI agent security
+  - LLM agent security
+  - agentic AI security
+
+cti:
+  - cyber threat intelligence
+  - CTI grounding
+
+kg:
+  - knowledge graph
+  - security knowledge graph
+  - CTI knowledge graph
+
+behavior:
+  - agent behavior
+  - tool misuse
+  - spec gaming
+  - reward hacking
+```
+
+형태로 유지합니다.
 
 ---
 
-## 제가 권하는 최종 구조
+# 5. 중복 검사도 DB 없이 처리
 
-단순히
+중복 제거 역시 DB가 필수는 아닙니다.
 
-> `Hermes → 검색 → 요약`
+Raw Markdown의 frontmatter를 이용합니다.
 
-으로 만들기보다는,
+예:
 
 ```
-                 Hermes
-                   │
-             Cron Scheduler
-                   │
-        ┌──────────┴──────────┐
-        │                     │
-     Python/API             LLM
-        │                     │
-논문 검색·중복제거       의미 판단·분석
-        │                     │
-        └──────────┬──────────┘
-                   ▼
-                SQLite
-                   +
-               Markdown
-                   │
-          ┌────────┴────────┐
-          ▼                 ▼
-     Daily Papers      Weekly Synthesis
-                            │
-                            ▼
-                     Research Gap DB
-                            │
-                            ▼
-                    박사논문 연구전략
+---
+title: "..."
+doi: "10.xxxx/xxxx"
+arxiv: "2609.12345"
+semantic_scholar_id: "..."
+collected: 2026-09-08
+---
 ```
 
-가 가장 좋습니다.
+새 논문을 발견하면 Hermes 또는 수집 Script가:
 
-**Python/API는 “정확하고 반복적인 일”을 담당하고, Hermes LLM은 “읽고 판단하고 연결하는 일”을 담당**하게 만드는 것입니다. 검색·중복 제거까지 전부 Agent에게 맡기는 것보다 훨씬 재현 가능하고 비용도 낮습니다.
+```
+raw/
+```
 
-또 Semantic Scholar에는 기존 논문을 기반으로 관련 논문을 추천하는 API가 있으므로, 나중에는 `키워드 검색 → 핵심논문 선정 → 핵심논문 기반 추천 → citation/reference graph 추적`의 **4단계 Literature Discovery**로 발전시키는 것이 좋습니다. [Semantic Scholar](https://api.semanticscholar.org/api-docs/recommendations?utm_source=chatgpt.com)
+에서 DOI 또는 arXiv ID를 검색합니다.
 
-현재 진행 중인 **CTI-KG / AI Agent Security / spec-gaming 연구**라면, 이 구조에서 단순 `관련/비관련`이 아니라 **① CTI, ② KG, ③ Agent Security, ④ Behavior Detection, ⑤ Spec-gaming, ⑥ Tool Security, ⑦ Baseline 후보, ⑧ Research Gap**의 8개 축으로 자동 태깅하게 만드는 것이 특히 유용합니다.
+판정 순서는:
+
+```
+DOI
+ ↓
+arXiv ID
+ ↓
+Semantic Scholar ID
+ ↓
+normalized title
+```
+
+이면 충분합니다.
+
+따라서:
+
+```
+DB query
+```
+
+대신:
+
+```
+Markdown metadata search
+```
+
+를 사용하는 것입니다.
+
+논문이 수천~수만 편까지 늘어나면 BM25나 local index를 **검색 가속용**으로 추가할 수 있지만, 여전히 Wiki가 원본입니다.
+
+---
+
+# 6. 관련성 판단 후에만 Wiki로 Ingest
+
+수집된 모든 논문을 Wiki에 넣으면 금방 오염됩니다.
+
+그래서:
+
+```
+검색
+ ↓
+관련성 평가
+ ↓
+중요 논문만 Wiki ingest
+```
+
+해야 합니다.
+
+예:
+
+```
+0 = 무관
+1 = 약간 관련
+2 = 간접 관련
+3 = 관련
+4 = 매우 중요
+5 = 핵심 선행연구
+```
+
+그리고:
+
+```
+score >= 3
+```
+
+인 논문만 Wiki에 반영합니다.
+
+---
+
+# 7. 핵심 단계 — Ingest가 단순 “추가”가 아니어야 함
+
+여기가 LLM Wiki 방식의 핵심입니다.
+
+새 논문:
+
+```
+Paper X
+```
+
+가 들어오면 Hermes에게:
+
+```
+Paper X를 요약하고 저장해라.
+```
+
+라고 하면 안 됩니다.
+
+대신:
+
+```
+Paper X를 읽어라.
+
+기존 Wiki에서 관련 개념, 연구, 방법,
+주장, Research Gap을 찾는다.
+
+새 논문의 지식을 기존 Wiki와 비교한다.
+
+필요하면:
+
+- 기존 페이지 수정
+- 새로운 개념 페이지 생성
+- 관련 페이지 간 wikilink 추가
+- 기존 주장 강화
+- 기존 주장 약화
+- contradiction 기록
+- research gap 갱신
+
+을 수행한다.
+```
+
+라고 해야 합니다.
+
+LLM Wiki 문서가 이것을 **append가 아니라 refactor pass**로 설명하는 이유가 바로 이것입니다. 새 source 하나가 들어올 때 Wiki 전체 중 관련 영역이 다시 구조화됩니다. [LLM Wiki](https://llmwiki.cc/docs?utm_source=chatgpt.com)
+
+---
+
+# 8. 예를 들어 신규 논문 한 편이 들어오면
+
+기존 Wiki:
+
+```
+[[AI Agent Security]]
+     │
+     ├── [[Behavior Monitoring]]
+     └── [[Tool Misuse]]
+```
+
+새 논문:
+
+```
+CTI-based temporal behavior graph for LLM agents
+```
+
+가 들어왔다고 가정하면,
+
+자동으로:
+
+```
+[[AI Agent Security]]
+     │
+     ├── [[Behavior Monitoring]]
+     │        │
+     │        └── [[Temporal Behavior Chain]]
+     │
+     ├── [[CTI Grounding]]
+     │
+     └── [[Knowledge Graph Reasoning]]
+```
+
+가 생성됩니다.
+
+그리고 기존:
+
+```
+wiki/topics/agent-threat-detection.md
+```
+
+도 수정됩니다.
+
+예:
+
+```
+## 주요 탐지 접근
+
+### Behavior-only
+
+Paper A, B에서 사용.
+
+한계:
+행동 발생 이후 판단하는 경우가 많음.
+
+### Text-RAG
+
+Paper C에서 사용.
+
+장점:
+외부 CTI grounding 가능.
+
+한계:
+관계 구조와 시간 구조 표현에 제한.
+
+### CTI-KG
+
+Paper D, E에서 사용.
+
+새로운 연구에서 temporal path reasoning을
+Agent runtime monitoring에 적용하기 시작함.
+```
+
+이게 바로 **지식 증분**입니다.
+
+---
+
+# 9. Wiki Link가 곧 Knowledge Graph 역할
+
+별도 Neo4j도 처음에는 필요하지 않습니다.
+
+```
+[[CTI]]
+[[MITRE ATT&CK]]
+[[Tool Misuse]]
+[[Behavior Chain]]
+[[Agent Runtime Monitoring]]
+```
+
+이 연결 자체가 lightweight Knowledge Graph가 됩니다.
+
+예:
+
+```
+[[Spec Gaming]]
+      │
+      ├─ related → [[Tool Misuse]]
+      │
+      ├─ detected-by → [[Behavior Monitoring]]
+      │
+      └─ mitigated-by → [[Runtime Policy]]
+```
+
+Markdown 링크를 기반으로 Obsidian 같은 툴에서도 그래프를 바로 볼 수 있습니다.
+
+---
+
+# 10. Paper Page보다 Topic Page가 더 중요
+
+논문 300편이 쌓였다고 가정해보겠습니다.
+
+낮은 수준의 시스템:
+
+```
+300 Paper summaries
+```
+
+좋은 LLM Wiki:
+
+```
+300 papers
+   ↓
+80 concepts
+   ↓
+30 research topics
+   ↓
+15 comparison pages
+   ↓
+10 recurring limitations
+   ↓
+7 research gaps
+   ↓
+5 strong research ideas
+```
+
+입니다.
+
+LLM Wiki 관련 구현들 역시 단순 문서 저장이 아니라, source가 기존 페이지에 cross-reference되고 시간이 지나면서 synthesis가 강화되는 것을 “compounding knowledge”의 핵심으로 설명합니다. [GitHub](https://github.com/Labhund/llm-wiki?utm_source=chatgpt.com)
+
+---
+
+# 11. 두 번째 Cron — Daily Wiki Refactoring
+
+논문 수집 후 별도 Cron을 두는 것도 좋습니다.
+
+예:
+
+```
+매일 08:00
+```
+
+작업:
+
+```
+오늘 ingest한 논문을 확인한다.
+
+관련 Wiki 페이지를 찾는다.
+
+다음을 수행한다:
+
+1. 새로운 claim 추가
+2. 기존 claim 보강
+3. contradiction 탐지
+4. 새로운 wikilink 추가
+5. topic page 업데이트
+6. method page 업데이트
+7. research gap 업데이트
+```
+
+결과는:
+
+```
+Paper
+ ↓
+Knowledge
+ ↓
+Relationship
+```
+
+으로 올라갑니다.
+
+---
+
+# 12. 세 번째 Cron — Weekly Synthesis
+
+매주:
+
+```
+일요일 21:00
+```
+
+지난 일주일 동안 변경된 Wiki를 읽습니다.
+
+단순히:
+
+```
+이번 주 논문 10편
+```
+
+을 요약하지 않습니다.
+
+대신:
+
+```
+어떤 지식이 바뀌었는가?
+```
+
+를 분석합니다.
+
+예:
+
+```
+# Weekly Knowledge Synthesis
+
+## 새롭게 강화된 주장
+
+CTI grounding이 Agent runtime detection에
+활용될 가능성을 보여주는 논문이 3편 추가됨.
+
+## 약해진 주장
+
+Behavior-only detector가 가장 효과적이라는
+기존 가정과 상충하는 연구 2편 발견.
+
+## Emerging Topic
+
+Temporal CTI reasoning
+
+## 반복되는 한계
+
+기존 연구 대부분이 static CTI 사용.
+
+## 새로운 Research Gap
+
+Agent 행동연쇄와
+temporal CTI-KG를 결합한
+pre-action detection 실험이 부족함.
+```
+
+---
+
+# 13. 네 번째 Cron — Research Gap Miner
+
+이 자동화를 별도로 두는 것을 추천합니다.
+
+예:
+
+```
+매주 월요일 06:00
+```
+
+다음 Wiki 페이지들을 읽습니다.
+
+```
+wiki/topics/
+wiki/methods/
+wiki/comparisons/
+wiki/gaps/
+```
+
+그리고 다음 질문을 반복합니다.
+
+```
+1. 여러 논문에서 반복되는 한계는 무엇인가?
+
+2. 서로 모순되는 결과는 무엇인가?
+
+3. 아직 직접 비교되지 않은 방법은 무엇인가?
+
+4. 아직 결합되지 않은 두 기술은 무엇인가?
+
+5. 평가 데이터가 부족한 가설은 무엇인가?
+
+6. 특정 환경에서만 검증된 주장은 무엇인가?
+
+7. 시간적 인과관계가 검증되지 않은 연구는?
+
+8. 새로운 benchmark가 필요한 영역은?
+```
+
+그리고:
+
+```
+wiki/gaps/research-gaps.md
+```
+
+를 업데이트합니다.
+
+---
+
+# 14. 다섯 번째 Cron — Research Idea Generator
+
+그리고 이것이 최종 목적입니다.
+
+예:
+
+```
+매월 1일
+```
+
+Hermes에게 논문 자체를 전부 읽게 하지 않습니다.
+
+이미 축적된:
+
+```
+Concepts
+Topics
+Methods
+Comparisons
+Contradictions
+Research Gaps
+```
+
+를 읽게 합니다.
+
+입력:
+
+```
+                         기존 Wiki
+                            │
+              ┌─────────────┼─────────────┐
+              ▼             ▼             ▼
+           Concepts       Methods       Findings
+              │             │             │
+              └─────────────┼─────────────┘
+                            ▼
+                       Research Gaps
+                            │
+                            ▼
+                     Idea Generation
+```
+
+출력은 단순 제목이 아니라:
+
+```
+# Research Idea 017
+
+## 아이디어
+
+Temporal CTI-KG 기반
+AI Agent 행동연쇄 사전 탐지
+
+## 근거
+
+[[CTI Grounding]]
+[[Temporal Reasoning]]
+[[Behavior Monitoring]]
+
+## 관찰된 Research Gap
+
+기존 CTI 기반 연구들은 대부분
+Agent action 이후 탐지에 집중.
+
+[[Research Gap - Pre-action Detection]]
+
+## Research Question
+
+시간 유효성을 갖는 CTI-KG path reasoning이
+behavior-only detector보다
+금지 행동을 더 일찍 탐지할 수 있는가?
+
+## Hypothesis
+
+...
+
+## Baselines
+
+[[Behavior-only Detection]]
+[[Text-RAG]]
+[[Static KG]]
+
+## Experimental Design
+
+...
+
+## Novelty Risk
+
+Medium
+
+## Supporting Papers
+
+[[Paper A]]
+[[Paper C]]
+[[Paper H]]
+
+## Contradicting Papers
+
+[[Paper D]]
+```
+
+처럼 만들어야 합니다.
+
+---
+
+# 15. “아이디어도 Wiki에 저장”하는 것이 중요
+
+아이디어를 보고 끝내면 복리가 끊깁니다.
+
+그래서:
+
+```
+wiki/ideas/
+```
+
+에 저장합니다.
+
+예:
+
+```
+idea-001
+idea-002
+idea-003
+```
+
+그리고 이후 새로운 논문이 들어올 때도 해당 아이디어를 비교합니다.
+
+```
+새 Paper
+   ↓
+Idea-001과 관련?
+   ↓
+YES
+   ↓
+근거 강화 / 약화
+   ↓
+Idea-001 업데이트
+```
+
+예:
+
+```
+## Evidence Status
+
+2026-08
+초기 근거: 3편
+
+2026-09
+관련 논문 4편 추가
+→ 가설 근거 강화
+
+2026-10
+반대 결과 논문 2편
+→ novelty 유지
+→ effectiveness hypothesis 약화
+```
+
+즉 **연구 아이디어 자체가 살아 있는 Wiki object**가 됩니다.
+
+---
+
+# 16. 그러면 진짜 “복리”가 발생
+
+1개월 후:
+
+```
+50 papers
+ → 20 concepts
+ → 8 gaps
+ → 3 ideas
+```
+
+3개월 후:
+
+```
+150 papers
+ → 45 concepts
+ → 25 topic synthesis
+ → 18 comparisons
+ → 15 gaps
+ → 10 ideas
+```
+
+6개월 후:
+
+```
+300 papers
+      ↓
+연구 분야 구조화
+      ↓
+상충되는 증거 축적
+      ↓
+Research Gap 정교화
+      ↓
+가설 변화
+      ↓
+Idea 평가
+      ↓
+새로운 Paper 추가
+      ↓
+다시 Wiki 강화
+```
+
+가 됩니다.
+
+이를 제가 표현하면:
+
+```
+Paper
+  ↓
+Information
+  ↓
+Knowledge
+  ↓
+Relationship
+  ↓
+Synthesis
+  ↓
+Research Gap
+  ↓
+Hypothesis
+  ↓
+Research Idea
+  ↓
+새 논문
+  ↺
+```
+
+입니다.
+
+단순 RAG와 가장 큰 차이가 여기 있습니다. RAG는 질문할 때 raw corpus를 다시 검색하지만, LLM Wiki는 이전 synthesis 결과를 **지속되는 artifact로 남겨 다음 추론의 입력으로 다시 활용**합니다. [LLM Wiki](https://llmwiki.cc/docs?utm_source=chatgpt.com)
+
+---
+
+# 17. Hermes에는 5개 Skill을 두는 것을 추천
+
+```
+skills/
+
+paper-discovery/
+    SKILL.md
+
+paper-ingest/
+    SKILL.md
+
+wiki-refactor/
+    SKILL.md
+
+research-gap-miner/
+    SKILL.md
+
+research-idea-generator/
+    SKILL.md
+```
+
+역할은:
+
+```
+paper-discovery
+       ↓
+논문을 찾음
+
+paper-ingest
+       ↓
+논문의 지식을 추출
+
+wiki-refactor
+       ↓
+기존 Wiki와 연결/수정
+
+research-gap-miner
+       ↓
+지식 공백 탐색
+
+research-idea-generator
+       ↓
+새 연구 가설 생성
+```
+
+으로 나눕니다.
+
+Hermes Cron은 Skill을 attached workflow로 실행할 수 있기 때문에 이런 분리가 잘 맞습니다. [GitHub](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/user-guide/features/cron.md?utm_source=chatgpt.com)
+
+---
+
+# 18. 권장 자동화 일정
+
+최종적으로 다음 정도가 좋습니다.
+
+
+| 자동화              | 주기       | 목적              |
+| ---------------- | -------- | --------------- |
+| Paper Discovery  | 매일 07:00 | 신규 논문 발견        |
+| Paper Ingest     | 매일 07:30 | 관련 논문 지식화       |
+| Wiki Refactor    | 매일 08:00 | 기존 지식과 연결       |
+| Weekly Synthesis | 일요일      | 한 주간 지식 변화 정리   |
+| Gap Mining       | 매주 월요일   | Research Gap 갱신 |
+| Idea Generation  | 매월       | 새로운 연구 아이디어 생성  |
+
+
+여기에서 중요한 것은 **Idea Generation을 매일 돌리지 않는 것**입니다.
+
+논문 한두 편마다 아이디어를 뽑으면 잡음이 많아집니다.
+
+```
+Daily = Evidence
+
+Weekly = Knowledge
+
+Monthly = Idea
+```
+
+로 역할을 나누는 것이 좋습니다.
+
+---
+
+# 19. Research Idea 생성에 “Novelty Ledger” 추가 권장
+
+박사논문 목적이라면 한 단계 더 추가하겠습니다.
+
+```
+wiki/ideas/
+    └── idea-017.md
+```
+
+안에:
+
+```
+## Novelty Ledger
+
+### Known Similar Work
+
+- [[Paper A]]
+- [[Paper B]]
+
+### What already exists
+
+CTI-KG 기반 공격 탐지
+
+### What appears missing
+
+CTI-KG를 Agent action 이전
+pre-action decision에 적용
+
+### Potential novelty
+
+Temporal attack-path reasoning
++
+Agent tool decision
+
+### Threat to novelty
+
+새로운 논문 발견 시 반드시 재평가
+
+### Novelty confidence
+
+0.72
+```
+
+를 유지합니다.
+
+새 논문이 발견될 때:
+
+```
+Novelty Ledger
+      ↓
+새 논문과 비교
+      ↓
+Novelty 유지?
+      ├─ Yes → confidence ↑
+      └─ No  → idea 수정/폐기
+```
+
+하도록 만듭니다.
+
+이렇게 하면 Hermes가 그럴듯한 아이디어를 계속 만들어내는 것이 아니라 **문헌 근거로 아이디어를 살아 있게 관리**하게 됩니다.
+
+---
+
+# 20. 최종 추천 Hermes + LLM Wiki 아키텍처
+
+전체를 하나로 합치면 다음 구조입니다.
+
+```
+                    HERMES
+                       │
+                 Cron Scheduler
+                       │
+                       ▼
+              ┌─ Paper Discovery ─┐
+              │                   │
+           OpenAlex        Semantic Scholar
+              │                   │
+              └────── arXiv ──────┘
+                       │
+                       ▼
+                 Relevance Filter
+                       │
+                       ▼
+                 RAW SOURCES
+            ┌─────────────────────┐
+            │ immutable evidence  │
+            └─────────────────────┘
+                       │
+                       ▼
+                  LLM INGEST
+                       │
+                       ▼
+              ┌── LLM WIKI ──┐
+              │               │
+            Papers         Concepts
+              │               │
+            Topics          Methods
+              │               │
+              └──────┬────────┘
+                     ▼
+                 Relations
+                     │
+                     ▼
+                 Synthesis
+                     │
+          ┌──────────┼───────────┐
+          ▼          ▼           ▼
+      Comparisons  Trends  Contradictions
+          │          │           │
+          └──────────┼───────────┘
+                     ▼
+               RESEARCH GAPS
+                     │
+                     ▼
+              IDEA GENERATOR
+                     │
+             ┌───────┼────────┐
+             ▼       ▼        ▼
+            RQ    Hypothesis  Method
+             │       │        │
+             └───────┼────────┘
+                     ▼
+               Novelty Ledger
+                     │
+                     ▼
+                wiki/ideas/
+                     │
+                     │
+       새로운 논문이 들어오면
+                     │
+                     └───────────↺
+```
+
+## 핵심 철학은 한 문장으로 정리할 수 있습니다.
+
+**“논문을 저장하는 시스템이 아니라, 새 논문이 들어올 때마다 기존 연구 지식을 다시 편집하고 연결하며, 그 위에서 Research Gap과 연구 아이디어가 계속 진화하는 시스템”**으로 만드는 것입니다.
+
+특히 현재 진행하시는 **CTI-KG + AI Agent Security + 행동연쇄 탐지/spec-gaming** 연구에는 이 방식이 잘 맞습니다. 예를 들어 `[[CTI Grounding]]`, `[[Temporal Reasoning]]`, `[[Behavior Chain]]`, `[[Spec Gaming]]`, `[[Tool Misuse]]`, `[[Runtime Monitoring]]` 등이 독립적인 Wiki concept으로 성장하다가, 시간이 지나면서 이들 사이에서 **“아직 실증적으로 검증되지 않은 조합”**을 자동으로 찾아내게 만들 수 있습니다.
+
+다음 구현 단계에서는 이 구조를 기준으로 **실제로 Hermes에서 바로 사용할 수 있는** `research-wiki/` **디렉터리 전체 구조 +** `.[hermes.md](http://hermes.md)` **+ 5개** [`SKILL.md`](http://SKILL.md) **+ Cron 설정 + Wiki Markdown 템플릿**까지 만들어두면 바로 구축에 들어갈 수 있습니다.
