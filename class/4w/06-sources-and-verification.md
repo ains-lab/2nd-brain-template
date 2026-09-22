@@ -142,7 +142,7 @@ SQL: [('reddit', 1), ('threads', 1), ('x', 1)]
 
 개정 실행 환경은 **Python 3.12.3**이다. 최초 버전의 8개 테스트를 먼저 실행해 통과한 뒤 확장했다. 추가 기능·결함은 실패 테스트로 확인하고 구현했으며, 원래 통과한 회귀 커버리지는 새로운 RED 증거라고 부르지 않는다.
 
-전체 명령은 위 unittest discover와 동일하다. 현재 확인 결과: **44 tests, OK**. `test_materials.py`에는 문서 상대 링크, Bash 구문, UTF-8/LF/EOF, 코드 fence, Python AST, JSON 검사가 포함된다.
+전체 명령은 위 unittest discover와 동일하다. 최종 확인 결과: **46 tests, OK**. `test_materials.py`에는 문서 상대 링크, Bash 구문, UTF-8/LF/EOF, 코드 fence, Python AST, JSON 검사가 포함된다. Python 3.9 문법 파싱도 통과했지만 실제 Python 3.9 런타임에서 재실행한 것은 아니다.
 
 임시 HOME에서 **README quickstart의 Bash 블록을 그대로 실행**한 뒤 이어서 관측한 결과:
 
@@ -159,6 +159,8 @@ SQL: [('reddit', 1), ('threads', 1), ('x', 1)]
 | 루트 Wiki | SCHEMA/index/log 해시와 raw/canonical 상태 변경 없음 |
 
 별도의 합성 **구조 UNIT fixture**로 `finish` 수락 → 동일 배치 noop → 새 버전만 pending, 부분 수락, raw/frontmatter 변조 거부, index/log 오류, SCHEMA drift, created 보존·updated 갱신, abort 상태, CLI 정상/실패 종료를 검사했다. 이 fixture는 실제 Hermes가 출처를 읽고 생성한 의미적 컴파일 결과가 아니다.
+
+독립 코드 검토에서 보류된 출처가 새 출처의 배치 진입을 막는 문제가 발견돼 수정했다. 합성 101개를 100개씩 네 차례 prepare/abort해 순환을 검증했고, 부분 finish 후에도 미검토 → 오래된 보류 순서로 선택됨을 확인했다. 미처리 수·기존 raw·manifest·prompt·이력은 보존되며 가짜 수락은 만들지 않는다. 수정 후 전체 46개 테스트와 `git diff --check`를 다시 통과했다.
 
 실제 SNS 인증 요청, LLM 컴파일 자동 실행, 사용자 개인 DB/Wiki 변경, cron 생성·수정, 토큰·인증 파일 열람은 하지 않았다. QA 데이터는 임시 경로에서 생성하고 정리했다. 배포 전 실제 승인된 소량 데이터로 별도 검증해야 한다.
 

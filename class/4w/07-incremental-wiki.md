@@ -75,6 +75,8 @@ python3 class/4w/lab/wiki_pipeline.py prepare \
 
 출력의 `batch_id`, `manifest`, `prompt` 실제 경로를 기록한다. manifest에는 이번 배치의 출처와 해시가 고정되고, prompt는 Hermes에게 전달할 작업 지시다. **`prepared`는 컴파일 완료가 아니다.** 미완료 배치가 있으면 재호출 시 그 배치를 재사용한다. 새 수집과 섞인 거대 요청 대신 제한된 입력을 검토한다.
 
+새 배치를 만들 때는 **아직 배치에 넣지 않은 출처 → 가장 오래전에 배치에 넣은 미처리 출처** 순서로 선택한다. 동률은 `version_id` 순이다. 기본 20개, 최대 100개이며, 보류가 누적돼도 새 근거가 같은 앞부분 뒤에 영구히 갇히지 않는다. 부분 finish나 abort 이후 다음 prepare에서 순환하고, 보류한 출처를 완료 처리하거나 버리지는 않는다.
+
 수집/export → prepare → Hermes 편집 → 사람 검토 → finish 순서로 한 작업자만 실행한다. manifest 생성 후 같은 위키에서 다른 작업을 동시에 실행하지 않는다.
 
 ## 5. Hermes에서 omh-wiki로 실제 컴파일
