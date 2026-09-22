@@ -31,12 +31,17 @@ export HERMES_PROFILE_HOME="${HERMES_HOME:-$HOME/.hermes}"
 mkdir -p "$SNS_ROOT/lab" "$HERMES_PROFILE_HOME/scripts"
 chmod 700 "$SNS_ROOT" "$SNS_ROOT/lab"
 cp class/4w/lab/pipeline.py "$SNS_ROOT/lab/pipeline.py"
+cp class/4w/lab/wiki_pipeline.py "$SNS_ROOT/lab/wiki_pipeline.py"
 cp class/4w/lab/keywords.example.json "$SNS_ROOT/keywords.json"
 cp class/4w/examples/run-sns.py "$HERMES_PROFILE_HOME/scripts/sns-collect.py"
 chmod 600 "$SNS_ROOT/keywords.json" "$HERMES_PROFILE_HOME/scripts/sns-collect.py"
+python3 "$SNS_ROOT/lab/wiki_pipeline.py" init \
+  --wiki-dir "$SNS_ROOT/live-wiki" --schema SCHEMA.md --mode live
 ```
 
-[wrapper 원본](examples/run-sns.py)은 Python 표준 라이브러리만 사용하며 현재 Hermes Python으로 수집기를 실행한다. config와 live 데이터는 `$HOME/.local/share/hermes-sns/` 아래에서 찾는다. wrapper는 토큰 파일을 직접 읽지 않는다.
+[wrapper 원본](examples/run-sns.py)은 Python 표준 라이브러리만 사용하며 현재 Hermes Python으로 **수집 → SQLite 커밋 → raw export**를 순차 실행한다. config, `live-data`, `live-wiki`는 `$HOME/.local/share/hermes-sns/` 아래에서 찾는다. wrapper는 토큰 파일을 직접 읽지 않으며 위키를 자동 초기화하지 않는다. `init`은 새 위키에서 한 번만 실행하고 기존 위키에서는 생략한다.
+
+수집 exit 1(부분 수집/검색 실패)이어도 커밋된 자료의 raw export는 시도하지만 **최종 종료 코드는 실패로 유지**한다. 설정 오류 등 exit 2에서는 export를 건너뛴다. export 자체가 실패해도 nonzero다. 기존 raw를 덮어써 오류를 숨기지 말고 원인을 확인한다. 이 wrapper는 `prepare`, 모델 호출, canonical 편집, `finish`를 수행하지 않는다.
 
 키워드 config를 개인 편집기로 열어 원하는 검색어와 활성 플랫폼만 남긴다. 토큰은 config에 쓰지 않는다. `chmod 600`이어도 Python 인터프리터로 실행하므로 실행 비트는 필요 없다.
 
@@ -99,7 +104,9 @@ hermes cron status
 - 키워드별 상태가 `ok`. 0건인 키워드도 API 성공 여부가 따로 남는다.
 - `partial`이 있으면 검색 범위를 줄이거나 허용 예산 안에서 페이지 설정을 조정한다.
 - 토큰 누락·401·403이면 실패로 남고, stdout/stderr에 토큰이 나타나지 않는다.
-- DB, 응답 캡처, 내보내기의 경로가 기대한 개인 데이터 폴더다.
+- DB, 응답 캡처의 경로가 기대한 개인 데이터 폴더이고 `live-wiki/raw/web/`에 새 내용 버전만 기록된다. JSONL은 별도 `--report` 명령으로 생성한다.
+- 같은 내용을 다시 수집해도 raw 수·기존 바이트는 불변이고, 관측 이력만 늘어난다.
+- raw export 성공을 canonical 컴파일 성공으로 보고하지 않는다.
 
 실패하면 아직 반복 작업을 만들지 않는다. 테스트 작업이 남았다면 `hermes cron list`에서 ID를 확인한 후 그 ID만 제거한다.
 
@@ -139,9 +146,20 @@ hermes cron remove JOB_ID
 
 삭제·중지 전에 이름과 script를 함께 확인한다. 기존의 다른 작업은 건드리지 않는다. scheduler 중복 보호와 별개로 수동 실행까지 동시에 켜지 않도록 운영한다.
 
-## 6. 수집과 분석 작업은 분리
+## 6. 수집·컴파일·분석 작업은 분리
 
-수집은 매시간, 분석은 하루 한 번처럼 분리할 수 있다. 단순히 분석 job을 5분 뒤에 배치하는 것만으로 수집 완료가 보장되지는 않는다.
+수집/raw export는 매시간, 컴파일은 하루 한 번 검토, 분석은 검증된 상태에서 실행하는 식으로 분리한다. `--no-agent` 수집 job에 `omh-wiki`를 적어 넣는 것만으로 LLM 컴파일이 실행되지는 않는다. 단순히 다음 job을 5분 뒤에 배치하는 것만으로 앞 단계 완료가 보장되지 않는다.
+
+처음에는 [증분 위키 실습](07-incremental-wiki.md)의 `prepare → Hermes + omh-wiki 편집 → 검토 → finish`를 수동으로 진행한다. 그 흐름이 검증된 후에만 별도 **agent 작업**의 자동화를 설계한다. 모델 비용, 스킬 로드, 위키 쓰기 범위와 사람 승인 정책은 수집기와 별개다. 이 강의는 실제 컴파일 cron을 등록하지 않는다.
+
+컴파일 작업의 입력 계약:
+
+1. export가 끝난 raw만 대상으로 배치 ID·해시를 고정한다. 준비된 manifest는 실행 증거가 아니다.
+2. 현재 open 배치부터 재개하고, 새 배치를 매번 쌓아 같은 출처를 중복 처리하지 않는다.
+3. 같은 위키를 편집하는 작업자는 하나만 둔다. 실습은 분산 잠금이나 다중 작업자 운영을 보장하지 않는다.
+4. 실패·해시 불일치·검토 보류 시 완료 checkpoint를 진행하지 않는다.
+5. 재준비가 필요하면 `abort`로 배치를 닫되 pending 출처와 이전 manifest는 남긴다.
+6. `finish`의 구조 검증 외에 사람이 주요 주장·출처·상충 정보를 검토한다.
 
 분석 job은 다음을 확인하고 시작해야 한다.
 
@@ -163,6 +181,9 @@ hermes cron remove JOB_ID
 | 403 | 앱 승인·권한·API 상품 | 권한 해결, 우회 금지 |
 | 429 | 조회 빈도·할당량 | 지수 backoff·주기 완화·예산 확인 |
 | 계속 partial | 페이지 한도 대비 결과량 | 키워드 분할·기간 제약·증분 수집 확장 |
+| raw export 실패 | demo/live, 데이터셋 바인딩, 해시·권한 | 원본 덮어쓰기 금지, 실패 원인 검토 |
+| prepare만 반복됨 | 실제 편집·검토·finish 여부 | 같은 배치 재개, 근거 부족은 보류 |
+| finish 실패 | raw 변조·canonical·index·log 오류 | 완료 상태를 수동 변경하지 말고 검토·수정 |
 | 작업은 있는데 실행 안 됨 | cron status의 heartbeat·gateway·절전 | 실행 호스트 복구 |
 | 0건이 갑자기 많아짐 | 성공 0건 vs 실패 0건 | 상태와 API 정책/검색어 변화를 함께 확인 |
 

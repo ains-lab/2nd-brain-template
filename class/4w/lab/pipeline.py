@@ -1,7 +1,14 @@
-"""Bounded snapshot lab: no checkpoint, refresh, scheduler, or .env loading.
-Demo records are synthetic. Repeat runs deduplicate posts, not observations.
+"""Bounded incremental snapshot lab; no checkpoint, scheduler or .env loading.
+
+Demo records are synthetic. posts/matches retain the first capture for legacy
+exports. post_versions is content-addressed; observations retain run/query/time
+and metrics (the first hit per run/query/version wins on duplicate pages).
+database() performs the additive, idempotent migration, including on report().
+Legacy observations without verifiable payload provenance cannot be recovered.
+Page savepoints protect SQLite consistency, not crash-atomic DB/file commits.
 """
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -39,6 +46,11 @@ def save_json(path, value):
 
 
 def database(data):
+    """Open/migrate a Path directory's database; caller owns the connection.
+
+    Migration and reporting require write access. Conflicting legacy query IDs
+    fail closed rather than assigning ambiguous historical observations.
+    """
     connection = sqlite3.connect(data / 'pipeline.sqlite3')
     os.chmod(data / 'pipeline.sqlite3', 0o600)
     connection.row_factory = sqlite3.Row
@@ -54,9 +66,110 @@ def database(data):
     CREATE TABLE IF NOT EXISTS health (
       run_id TEXT, query_id TEXT, platform TEXT, status TEXT, fetched INTEGER,
       reason TEXT);
+    CREATE TABLE IF NOT EXISTS post_versions (
+      version_id TEXT PRIMARY KEY, platform TEXT, id TEXT, content_hash TEXT,
+      created_at TEXT, source_url TEXT, text TEXT, external_urls_json TEXT,
+      first_collected_at TEXT, UNIQUE(platform,id,content_hash));
+    CREATE TABLE IF NOT EXISTS observations (
+      observation_id INTEGER PRIMARY KEY, run_id TEXT, query_id TEXT,
+      platform TEXT, id TEXT, version_id TEXT, observed_at TEXT,
+      metrics_json TEXT, payload_path TEXT,
+      UNIQUE(run_id,query_id,platform,id,version_id));
+    CREATE TABLE IF NOT EXISTS query_definitions (
+      query_id TEXT PRIMARY KEY, platform TEXT, query TEXT);
+    CREATE VIEW IF NOT EXISTS observation_facts AS
+      SELECT o.*, v.created_at, v.source_url, v.text, v.external_urls_json,
+             v.content_hash, q.query
+      FROM observations o JOIN post_versions v USING(version_id)
+      LEFT JOIN query_definitions q ON q.query_id=o.query_id AND q.platform=o.platform;
     ''')
-    connection.commit()
+    try:
+        with connection:
+            register_queries(connection, connection.execute(
+                'SELECT DISTINCT query_id AS id,platform,query FROM matches'))
+            # First-capture rows are immutable compatibility records. Migrate only
+            # identities not yet represented; never synthesize historical runs.
+            for row in connection.execute('''SELECT p.* FROM posts p WHERE NOT EXISTS
+                    (SELECT 1 FROM post_versions v WHERE v.platform=p.platform AND v.id=p.id)'''):
+                post = dict(row)
+                post['external_urls'] = json.loads(post['external_urls_json'])
+                version_id = store_version(connection, post['platform'], post, post['collected_at'])
+                backfill_observations(connection, data, post, version_id)
+    except Exception:
+        connection.close()
+        raise
     return connection
+
+
+def register_queries(connection, queries):
+    """Lock each query ID to its original meaning, including zero-hit queries."""
+    for query in queries:
+        original = connection.execute('SELECT platform,query FROM query_definitions WHERE query_id=?',
+                                      (query['id'],)).fetchone()
+        if original is not None and tuple(original) != (query['platform'], query['query']):
+            raise ValueError('query_id conflict')
+        connection.execute('INSERT OR IGNORE INTO query_definitions VALUES (?,?,?)',
+                           (query['id'], query['platform'], query['query']))
+
+
+def content_hash(platform, post):
+    """Return the SHA-256 identity of canonical UTF-8 content, not metrics.
+
+    URL list order is significant. Dates are normalized to UTC; no text or URL
+    normalization is done here. Only the six documented content fields are used.
+    """
+    content = {key: post[key] for key in ('id', 'source_url', 'text', 'external_urls')}
+    content.update(platform=platform, created_at=utc(post['created_at']))
+    return hashlib.sha256(json.dumps(content, sort_keys=True, ensure_ascii=False,
+                                    separators=(',', ':'), allow_nan=False).encode('utf-8')).hexdigest()
+
+
+def store_version(connection, platform, post, collected_at):
+    """Insert an immutable version if absent; return its content-derived ID."""
+    digest = content_hash(platform, post)
+    connection.execute('INSERT OR IGNORE INTO post_versions VALUES (?,?,?,?,?,?,?,?,?)',
+                       (digest, platform, post['id'], digest, utc(post['created_at']),
+                        post['source_url'], post['text'], json.dumps(post['external_urls']), collected_at))
+    return digest
+
+
+def backfill_observations(connection, data, post, version_id):
+    """Recover only an original version's evidenced legacy matches.
+
+    Missing/invalid/out-of-directory payloads, unknown runs and changed content
+    cannot establish provenance: keep the version, omit the observation. Legacy
+    dedup discarded repeat observations; those cannot be reconstructed. This is
+    attempted only when a legacy post has no version, not on every database open.
+    """
+    for match in connection.execute('SELECT * FROM matches WHERE platform=? AND id=?',
+                                    (post['platform'], post['id'])):
+        try:
+            path = Path(match['payload_path'])
+            if (path.is_symlink() or path.resolve().parent != data.resolve() or
+                    path.suffix != '.json' or path.stat().st_size > 5_000_000):
+                continue
+            envelope = json.loads(path.read_text(encoding='utf-8'))
+            if any(envelope[key] != match[key] for key in ('query_id', 'platform', 'query')):
+                continue
+            if not connection.execute('SELECT 1 FROM runs WHERE id=?', (envelope['run_id'],)).fetchone():
+                continue
+            if not isinstance(envelope['collected_at'], str):
+                continue
+            observed_at = utc(envelope['collected_at'])
+            for item in envelope['posts']:
+                if item['id'] != post['id'] or content_hash(post['platform'], item) != version_id:
+                    continue
+                if not isinstance(item['metrics'], dict):
+                    continue
+                metrics_json = json.dumps(item['metrics'], allow_nan=False)
+                connection.execute('''INSERT OR IGNORE INTO observations
+                    (run_id,query_id,platform,id,version_id,observed_at,metrics_json,payload_path)
+                    VALUES (?,?,?,?,?,?,?,?)''',
+                                   (envelope['run_id'], match['query_id'], post['platform'], post['id'],
+                                    version_id, observed_at, metrics_json, match['payload_path']))
+        except (OSError, ValueError, KeyError, TypeError):
+            # Do not echo legacy payloads or paths into health/error output.
+            continue
 
 
 def demo_page(platform, query, token):
@@ -223,6 +336,24 @@ def validate(config):
         ids.add(query['id'])
 
 
+def validate_page(page):
+    """Reject malformed normalized records before persisting any part of a page."""
+    if not isinstance(page, dict) or not isinstance(page.get('posts'), list):
+        raise ValueError('invalid page')
+    safe_token(page['next_token'])
+    for post in page['posts']:
+        if (not isinstance(post, dict) or
+                any(not isinstance(post.get(key), str) for key in ('id', 'source_url', 'text')) or
+                not post['id'] or post.get('created_at') is None or
+                not isinstance(post.get('metrics'), dict) or
+                not isinstance(post.get('external_urls'), list) or
+                any(not isinstance(url, str) for url in post['external_urls'])):
+            raise ValueError('invalid post')
+        utc(post['created_at'])
+    # Serialize before save_json creates a file, including unknown adapter fields.
+    json.dumps(page['posts'], allow_nan=False)
+
+
 def run(config, data_dir, mode, fetch=None):
     validate(config)
     fetch = fetch or (demo_page if mode == 'demo' else Live())
@@ -241,6 +372,12 @@ def run(config, data_dir, mode, fetch=None):
     if not marker.exists():
         save_json(marker, {'mode': mode})
     connection = database(data)
+    try:
+        with connection:
+            register_queries(connection, config['queries'])
+    except Exception:
+        connection.close()
+        raise
     run_id = uuid.uuid4().hex
     connection.execute('INSERT INTO runs VALUES (?,?,?)', (run_id, utc(), 'ok'))
     overall = 'ok'
@@ -253,19 +390,34 @@ def run(config, data_dir, mode, fetch=None):
                 page = (fetch or demo_page)(query['platform'], query['query'], token)
                 payload = data / (uuid.uuid4().hex + '.json')
                 collected = utc()
-                save_json(payload, {'run_id': run_id, 'mode': mode,
-                                    'platform': query['platform'], 'query_id': query['id'],
-                                    'query': query['query'], 'collected_at': collected,
-                                    'posts': page['posts'], 'has_more': bool(page['next_token'])})
-                for post in page['posts']:
-                    connection.execute('INSERT OR IGNORE INTO posts VALUES (?,?,?,?,?,?,?,?)',
-                                       (query['platform'], post['id'], utc(post['created_at']), utc(),
-                                        post['source_url'], post['text'], json.dumps(post['metrics']),
-                                        json.dumps(post['external_urls'])))
-                    connection.execute('INSERT OR IGNORE INTO matches VALUES (?,?,?,?,?)',
-                                       (query['id'], query['platform'], post['id'], query['query'], str(payload)))
-                    fetched += 1
-                token = page['next_token']
+                connection.execute('SAVEPOINT collection_page')
+                try:
+                    validate_page(page)
+                    for post in page['posts']:
+                        connection.execute('INSERT OR IGNORE INTO posts VALUES (?,?,?,?,?,?,?,?)',
+                                           (query['platform'], post['id'], utc(post['created_at']), collected,
+                                            post['source_url'], post['text'], json.dumps(post['metrics']),
+                                            json.dumps(post['external_urls'])))
+                        connection.execute('INSERT OR IGNORE INTO matches VALUES (?,?,?,?,?)',
+                                           (query['id'], query['platform'], post['id'], query['query'], str(payload)))
+                        version_id = store_version(connection, query['platform'], post, collected)
+                        connection.execute('''INSERT OR IGNORE INTO observations
+                            (run_id,query_id,platform,id,version_id,observed_at,metrics_json,payload_path)
+                            VALUES (?,?,?,?,?,?,?,?)''',
+                                           (run_id, query['id'], query['platform'], post['id'], version_id,
+                                            collected, json.dumps(post['metrics']), str(payload)))
+                    next_token = page['next_token']
+                    save_json(payload, {'run_id': run_id, 'mode': mode,
+                                        'platform': query['platform'], 'query_id': query['id'],
+                                        'query': query['query'], 'collected_at': collected,
+                                        'posts': page['posts'], 'has_more': bool(next_token)})
+                except Exception:
+                    connection.execute('ROLLBACK TO collection_page')
+                    connection.execute('RELEASE collection_page')
+                    raise
+                connection.execute('RELEASE collection_page')
+                fetched += len(page['posts'])
+                token = next_token
                 if not token:
                     break
             if token:
@@ -284,12 +436,13 @@ def run(config, data_dir, mode, fetch=None):
 
 
 def report(data_dir):
+    """Migrate if needed, count versions/observations, and export legacy rows."""
     data = Path(data_dir).expanduser().absolute()
     mode = json.loads((data / 'mode.json').read_text())['mode']
-    connection = sqlite3.connect('file:' + str(data / 'pipeline.sqlite3') + '?mode=ro', uri=True)
-    connection.row_factory = sqlite3.Row
+    connection = database(data)
     result = {table: connection.execute('SELECT COUNT(*) FROM ' + table).fetchone()[0]
-              for table in ('posts', 'matches', 'runs')}
+              for table in ('posts', 'matches', 'runs', 'observations')}
+    result['versions'] = connection.execute('SELECT COUNT(*) FROM post_versions').fetchone()[0]
     result['failed_runs'] = connection.execute("SELECT COUNT(*) FROM runs WHERE status != 'ok'").fetchone()[0]
     result['health'] = [dict(row) for row in connection.execute('SELECT * FROM health')]
     export = data / ('export-' + uuid.uuid4().hex + '.jsonl')
