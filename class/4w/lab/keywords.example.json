@@ -1,0 +1,8 @@
+{
+  "max_pages": 2,
+  "queries": [
+    {"id": "x-hermes", "platform": "x", "query": "\"Hermes Agent\"", "enabled": true},
+    {"id": "threads-hermes", "platform": "threads", "query": "Hermes Agent", "enabled": true},
+    {"id": "reddit-hermes", "platform": "reddit", "query": "\"Hermes Agent\"", "enabled": true}
+  ]
+}
